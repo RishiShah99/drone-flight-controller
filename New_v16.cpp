@@ -133,6 +133,13 @@ float B_madgwick_disarmed = 0.50f; // Used during still-calibration settle windo
 float B_accel    = 0.12f;       // More accel smoothing for vibration-heavy tests
 float B_gyro     = 0.10f;       // More gyro smoothing to calm high-frequency jitter
 
+// Adaptive Madgwick recovery: temporarily boosts beta when a large attitude
+// error is detected and the accel reading is trustworthy (|a| ≈ 1g).
+// Gives fast recovery after disturbances without hurting vibration rejection.
+float B_madgwick_recovery  = 0.20f;   // Beta used during recovery (high)
+float recovery_threshold_deg = 5.0f;  // Error above this triggers recovery
+float recovery_ramp_rate   = 0.01f;   // How fast beta ramps back to B_madgwick_armed
+
 // Minimum motor duty cycle: helps weak/sticky motors start rotating.
 // Set to 0 for first tests. Increase if motors won't spin at low throttle.
 int MIN_DUTY_WHEN_RUNNING = 0;
@@ -141,6 +148,7 @@ int MIN_DUTY_WHEN_RUNNING = 0;
 float accMag_g = 1.0f;
 float accTrustWeight = 1.0f;   // 1.0 = accel fully trusted, 0.0 = fully rejected
 float accRejectPct = 0.0f;     // Percent of accel correction currently rejected
+float currentBeta = 0.02f;    // Adaptive beta, ramps between B_madgwick_armed and B_madgwick_recovery
 
 // Accel trust gate used by the attitude estimator.
 // If accel magnitude is far from 1 g, we reduce or reject accel correction so
@@ -598,7 +606,25 @@ static void Madgwick6DOF(float gx, float gy, float gz, float ax, float ay, float
 
     // Apply correction: subtract B (beta) * error_quaternion from rate of change
     // Higher B = stronger correction from accelerometer, more stable but slower response
-    const float betaBase = armedFly ? B_madgwick_armed : B_madgwick_disarmed;
+    float betaBase;
+    if (!armedFly) {
+      betaBase = B_madgwick_disarmed;
+      currentBeta = B_madgwick_armed;  // reset for next arm
+    } else {
+      // Adaptive recovery: compare Madgwick estimate against accel-only estimate.
+      // ax, ay, az are already normalized at this point.
+      float accelRoll  = atan2f(ay, az) * 57.29577951f;
+      float accelPitch = -atan2f(-ax, sqrtf(ay*ay + az*az)) * 57.29577951f;
+      float errDeg = max(fabsf(roll_IMU - accelRoll), fabsf(pitch_IMU - accelPitch));
+
+      if (accW > 0.8f && errDeg > recovery_threshold_deg) {
+        currentBeta = B_madgwick_recovery;
+      } else {
+        currentBeta -= recovery_ramp_rate;
+        if (currentBeta < B_madgwick_armed) currentBeta = B_madgwick_armed;
+      }
+      betaBase = currentBeta;
+    }
     float betaEff = betaBase * accW;
     qDot1 -= betaEff*s0;
     qDot2 -= betaEff*s1;
@@ -706,12 +732,12 @@ static void applyLevelTrimToAttitude() {
 // Convert the current corrected accelerometer reading into a starting attitude
 // estimate. Yaw is reset to zero because accel does not observe heading.
 static void seedAttitudeFromCurrentAccel() {
-  // Body-axis remap for this airframe/IMU mounting.
-  // The signs here are tuned to produce the correct roll_IMU and pitch_IMU
-  // directions for the mixer, which uses M1=FL, M2=FR, M3=BR, M4=BL with
-  // the dRehmFlight formula (m1 = T - P + R + Y). Because our M1 is front-LEFT
-  // (dRehmFlight's M1 is front-RIGHT), the roll sign must be flipped relative
-  // to a "standard" body-frame remap.
+  // Body-axis remap for this airframe/IMU mounting:
+  // - Sensor Y points toward the drone nose
+  // - Sensor X points toward the drone left side
+  // Madgwick expects body X=forward and body Y=right, so we remap to:
+  //   X_body =  AccY
+  //   Y_body = -AccX
   float ax = -AccY;
   float ay =  AccX;
   float az =  AccZ;
@@ -820,6 +846,7 @@ static void forceOutputsSafeAndResetControllers() {
   roll_PID = 0.0f;
   pitch_PID = 0.0f;
   yaw_PID = 0.0f;
+  currentBeta = B_madgwick_armed;
 
   digitalWrite(STBY_PIN, LOW);
   ledcWrite(M1_PIN, 0);
@@ -923,7 +950,8 @@ static void controlANGLE() {
   // Limit integral to prevent it from growing unbounded and causing instability
   integral_roll = constrain(integral_roll, -i_limit, i_limit);
   
-  // Roll gyro channel matched to the axis remap used in Madgwick (gx = -GyroY).
+  // Roll axis is the drone's forward axis. With this IMU mounting, that maps
+  // to the sensor Y gyro channel.
   derivative_roll = -GyroY;
   
   // Combine P+I+D terms with tuned gains, scale by 0.01f for motor command conversion
@@ -937,7 +965,8 @@ static void controlANGLE() {
   integral_pitch += error_pitch * dt;
   if (channel_pwm[0] < 1060) integral_pitch = 0;
   integral_pitch = constrain(integral_pitch, -i_limit, i_limit);
-  // Pitch gyro channel matched to the axis remap used in Madgwick (gy = GyroX).
+  // Pitch axis is the drone's right axis. With this IMU mounting, that maps
+  // to the negative sensor X gyro channel.
   derivative_pitch = -GyroX;
   pitch_PID = 0.01f * (Kp_pitch_angle*error_pitch + Ki_pitch_angle*integral_pitch - Kd_pitch_angle*derivative_pitch);
 
@@ -946,9 +975,8 @@ static void controlANGLE() {
   // Desired yaw is a rotation rate (deg/sec), not an absolute angle
   // This allows continuous 360° spins without angle accumulation issues
   
-  // Body yaw rate (clockwise-positive) = -GyroZ.
-  // error = yaw_des - (-GyroZ) = yaw_des + GyroZ
-  error_yaw = yaw_des + GyroZ;
+  // Error: difference between desired and actual rotation rate
+  error_yaw = yaw_des - GyroZ;
   
   // Integral: accumulates to apply sustained torque for yaw
   integral_yaw += error_yaw * dt;
@@ -1017,7 +1045,7 @@ static void mixerQuad() {
 static void scaleToDuty() {
   // Convert normalized values (0.0-1.0) to 8-bit PWM duty cycle (0-255)
   // 0.0 → 0 (off), 0.5 → ~127, 1.0 → 255 (full power)
-  m1_duty = (int)lroundf(m1_cmd * 255.0f);
+  m1_duty = (int)lroundf(m1_cmd * 255.0f*0.98);
   m2_duty = (int)lroundf(m2_cmd * 255.0f);
   m4_duty = (int)lroundf(m4_cmd * 255.0f);
   m3_duty = (int)lroundf(m3_cmd * 255.0f);
@@ -1312,10 +1340,10 @@ static void allMotorsSameThrust() {
   }
 
   // Apply exactly the same duty to all motors.
-  m1_duty = thrust_duty;
+  m1_duty = 0.98* thrust_duty;
   m2_duty = thrust_duty;
-  m3_duty = thrust_duty;
-  m4_duty = thrust_duty;
+  m3_duty = 0.99* thrust_duty;
+  m4_duty = 0.99*thrust_duty;
 
   // Update normalized commands too so telemetry/debug stays consistent.
   m1_cmd = (float)m1_duty / 255.0f;
@@ -1456,7 +1484,7 @@ void loop() {
   if (!armedFly) {
     seedAttitudeFromCurrentAccel();
   } else {
-    // Body-axis remap matched to mixer motor positions (M1=FL, not FR).
+    // Note: Sign conventions are flipped on gyroY, gyroZ, AccX to match body axes
     Madgwick6DOF(-GyroY, GyroX, -GyroZ, -AccY, AccX, AccZ, dt);
   }
   applyLevelTrimToAttitude();
