@@ -109,19 +109,19 @@ float maxYaw    = 160.0f;       // Max yaw rotation rate (degrees/second)
 // Kp (Proportional): Responds to current angle error. Higher = more aggressively correct.
 // Ki (Integral): Accumulates error over time to eliminate steady-state error.
 // Kd (Derivative): Dampens response by considering rate of change. Higher = smoother but slower.
-float Kp_roll_angle  = 0.05f;   // Proportional gain for roll angle control
-float Ki_roll_angle  = 0.00f;   // Start with no integral while debugging vibration
-float Kd_roll_angle  = 0.00f;   // Derivative gain for roll (dampening/smoothing)
-float Kp_pitch_angle = 0.05f;   // Proportional gain for pitch angle control
-float Ki_pitch_angle = 0.00f;   // Start with no integral while debugging vibration
-float Kd_pitch_angle = 0.00f;   // Derivative gain for pitch
+float Kp_roll_angle  = 0.2f;    // dRehmFlight default (was 0.05 — 4x too low)
+float Ki_roll_angle  = 0.3f;    // dRehmFlight default (eliminates steady-state lean)
+float Kd_roll_angle  = 0.0f;    // Keep at 0 until hover confirmed, then try 0.05
+float Kp_pitch_angle = 0.2f;    // dRehmFlight default
+float Ki_pitch_angle = 0.3f;    // dRehmFlight default
+float Kd_pitch_angle = 0.0f;    // Keep at 0 until hover confirmed, then try 0.05
 
 // ============= Yaw Rate PID Controller Gains =============
 // Unlike roll/pitch (which control angles), yaw is controlled via rotation rate (degrees/sec).
 // This is because yaw doesn't have a natural "neutral" gravity reference like pitch/roll do.
-float Kp_yaw = 0.10f;           // Proportional gain for yaw rate
-float Ki_yaw = 0.00f;           // Keep yaw integral off until basic hover is stable
-float Kd_yaw = 0.00f;        // Derivative gain for yaw rate
+float Kp_yaw = 0.3f;            // dRehmFlight default (was 0.10 — 3x too low)
+float Ki_yaw = 0.05f;           // dRehmFlight default (corrects yaw drift)
+float Kd_yaw = 0.0f;            // Keep at 0 for brushed motors (risk of overheating)
 
 // ============= Filter Constants (Low-Pass Filters) =============
 // These parameters (0.0 to 1.0) control the weight of the NEW sensor sample in
@@ -1045,7 +1045,7 @@ static void mixerQuad() {
 static void scaleToDuty() {
   // Convert normalized values (0.0-1.0) to 8-bit PWM duty cycle (0-255)
   // 0.0 → 0 (off), 0.5 → ~127, 1.0 → 255 (full power)
-  m1_duty = (int)lroundf(m1_cmd * 255.0f*0.98);
+  m1_duty = (int)lroundf(m1_cmd * 255.0f);
   m2_duty = (int)lroundf(m2_cmd * 255.0f);
   m4_duty = (int)lroundf(m4_cmd * 255.0f);
   m3_duty = (int)lroundf(m3_cmd * 255.0f);
@@ -1340,10 +1340,10 @@ static void allMotorsSameThrust() {
   }
 
   // Apply exactly the same duty to all motors.
-  m1_duty = 0.98* thrust_duty;
+  m1_duty = thrust_duty;
   m2_duty = thrust_duty;
-  m3_duty = 0.99* thrust_duty;
-  m4_duty = 0.99*thrust_duty;
+  m3_duty = thrust_duty;
+  m4_duty = thrust_duty;
 
   // Update normalized commands too so telemetry/debug stays consistent.
   m1_cmd = (float)m1_duty / 255.0f;
