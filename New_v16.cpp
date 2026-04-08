@@ -103,6 +103,7 @@ float i_limit   = 25.0f;        // Anti-windup limit for PID integrators
 float maxRoll   = 30.0f;        // Max roll angle drone will try to achieve (degrees)
 float maxPitch  = 30.0f;        // Max pitch angle drone will try to achieve (degrees)
 float maxYaw    = 160.0f;       // Max yaw rotation rate (degrees/second)
+float maxYawPID = 0.15f;        // Yaw output clamp: prevents yaw from dominating mixer
 
 // ============= Angle PID Controller Gains (Roll & Pitch) =============
 // These PID gains control how aggressively the drone corrects roll and pitch angles.
@@ -119,7 +120,7 @@ float Kd_pitch_angle = 0.0f;    // Keep at 0 until hover confirmed, then try 0.0
 // ============= Yaw Rate PID Controller Gains =============
 // Unlike roll/pitch (which control angles), yaw is controlled via rotation rate (degrees/sec).
 // This is because yaw doesn't have a natural "neutral" gravity reference like pitch/roll do.
-float Kp_yaw = 0.3f;            // dRehmFlight default (was 0.10 — 3x too low)
+float Kp_yaw = 0.15f;           // Halved from 0.3 — safe for first yaw-enabled flight
 float Ki_yaw = 0.05f;           // dRehmFlight default (corrects yaw drift)
 float Kd_yaw = 0.0f;            // Keep at 0 for brushed motors (risk of overheating)
 
@@ -987,9 +988,10 @@ static void controlANGLE() {
   // Provides damping to prevent oscillation/overshoot
   derivative_yaw = (error_yaw - error_yaw_prev) / max(dt, 1e-6f);
   
-  // Yaw PID output
+  // Yaw PID output (clamped to prevent mixer saturation)
   yaw_PID = 0.01f * (Kp_yaw*error_yaw + Ki_yaw*integral_yaw + Kd_yaw*derivative_yaw);
-  
+  yaw_PID = constrain(yaw_PID, -maxYawPID, maxYawPID);
+
   // Save error for next iteration (needed for derivative calculation)
   error_yaw_prev = error_yaw;
 }
@@ -1172,7 +1174,7 @@ static uint32_t lastTelPrintMs = 0;
 if (millis() - lastTelPrintMs >= 50) { // ~20 Hz
   lastTelPrintMs = millis();
   Serial.printf(
-    "%lu -> TEL age=%lums ok=%d seq=%u | armedCmd=%d armedFly=%d STBY=%d | thr=%d yaw=%d pitch=%d roll=%d | IMU r=%.2f p=%.2f | PID r=%.3f p=%.3f y=%.3f | duty %3d %3d %3d %3d acc|=%.3f g aRej=%.1f%%\n",
+    "%lu -> TEL age=%lums ok=%d seq=%u | armedCmd=%d armedFly=%d STBY=%d | thr=%d yaw=%d pitch=%d roll=%d | IMU r=%.2f p=%.2f | PID r=%.3f p=%.3f y=%.3f | YAW gyroZ=%.1f yawDes=%.1f | duty %3d %3d %3d %3d acc|=%.3f g aRej=%.1f%%\n",
     (unsigned long)millis(),
     (unsigned long)age,
     ok ? 1 : 0,
@@ -1183,6 +1185,7 @@ if (millis() - lastTelPrintMs >= 50) { // ~20 Hz
     (int)t.thr, (int)t.yaw, (int)t.pitch, (int)t.roll,
     roll_IMU, pitch_IMU,
     roll_PID, pitch_PID, yaw_PID,
+    GyroZ, yaw_des,
     (int)constrain(m1_duty, 0, 255),
     (int)constrain(m2_duty, 0, 255),
     (int)constrain(m3_duty, 0, 255),
